@@ -1,0 +1,441 @@
+---
+title: "Kaggle - Titanic"
+author: "Marco Antônio Aragão Rocha"
+format: html
+editor: visual
+---
+
+## Objetivo
+
+Meu objetivo é modelar a base de passageiros do Titanic e prever quais tripulantes sobreviveram ao naufrágio ou não, para isso irei classificar como 0 ou 1 no conjunto de teste. A métrica utilizada pelo problema é a acurácia que consiste em (TP+TN) / (TP+FP +TN +FN)
+
+### Importando os Dados
+
+Obs: Nesse problema do kaggle as bases de treino e teste já foram separadas mas como o target não é visível na base de teste disponibilizada, visando ter uma validação mais robusta, também irei dividir a base de treino em uma base de teste e outro de treino assim será possível acompanhar de perto as métricas do modelo.
+
+```{r warning=F, message=FALSE}
+# Carregando pacotes 
+library(tidyverse)
+library(pROC)
+# Importando a base de dados
+dados <- read_csv("train.csv")
+```
+
+## Sanity nos Dados
+
+Verificar a quantidade de Nas por coluna
+
+```{r}
+qtd_na <- colSums(is.na(dados))
+qtd_na
+```
+
+As variáveis Age e Cabin apresentam muitos Nas, é nescessário pensar em formas de lidar com isso
+
+## Análise Exploratória dos Dados
+
+O Primeiro passo para entender melhor os dados e os problemas e tirar insights é por meio da análise exploratória que sera feita a seguir.
+
+```{r}
+head(dados)
+```
+
+### Gerando Visualizações e Transfromando os Dados
+
+Conforme vemos a base de dados consiste em 891 observações e 12 variávies, agora vamos gerar visualizações com o ggplot para entender melhor o comportamento dos dados.
+
+```{r}
+summary(dados)
+sapply(dados,class)
+
+```
+
+Observando a classe de cada variável vemos que algumas não estão com a classificação correta, isso pode gerar problemas tanto na parte de visualização quanto na parte de rodar o modelo. Alguns exemplos de variavies q devem ser recategorizadas como fator: Survided, Pclass, Sex, Embarked.
+
+Caso isso não seja feito teremos problemas como o gráfico mostrado a seguir.
+
+```{r}
+
+ggplot(data = dados, mapping = aes(x = Survived, y = Age))+ geom_boxplot()
+
+
+```
+
+Corrigindo o problema por meio da recategorização das variáveis.
+
+```{r}
+dados$Survived <- as.factor(dados$Survived)
+dados$Sex <- as.factor(dados$Sex)
+dados$Pclass <- as.factor(dados$Pclass)
+dados$Embarked <- as.factor(dados$Embarked)
+attach(dados)
+ggplot(data = dados, mapping = aes(x = Survived, y = Age))+ geom_boxplot()
+
+```
+
+No boxplot vemos uma sutil diferença entre a idade das pessoas q sobreviveram (S=1) e das pessoas que morreram (S=0)
+
+Agora vamos tentar ver alguma relação com a tarifa dos passageiros.
+
+```{r}
+ggplot(data = dados, mapping = aes(x = Survived, y = Fare))+ geom_boxplot()
+```
+
+É possível notar uma diferença mais significativa nos boxplots quando se analisdo a tarifa paga.
+
+Análise do impacto do número irmãos/cônjuges a bordo do Titanic e a sobrevivência
+
+```{r}
+ggplot(data = dados, mapping = aes(x = SibSp))+ geom_bar()
+ggplot(data = dados, mapping = aes(x = SibSp))+ geom_bar()+facet_wrap(~Survived)
+```
+
+Observa-se que nenhuma pessoa com mais que 4 irmãos/cônjuges a bordo conseguiu sobreviver.
+
+Analisando o impacto do número de de pais/filhos a bordo do Titanic na sobrevivência
+
+```{r}
+ggplot(data = dados, mapping = aes(x = Parch))+ geom_bar()
+ggplot(data = dados, mapping = aes(x = Parch))+ geom_bar()+facet_wrap(~Survived)
+```
+
+Esses gráficos não são tão informativos porque o número de pessoas que sobreviveram e não sobreviveram são muito diferentes, dessa maneira estamos mais interresados em ver o percentual de de pessoas dentre as que sobreviveram ou não que tinham filhos abordo etc...
+
+### Repetindo os gráficos com o percentual por classe
+
+```{r}
+ggplot(data = dados, mapping = aes(x = SibSp, y= ..prop..))+ geom_bar()+facet_wrap(~Survived)
+```
+
+```{r}
+ggplot(data = dados, mapping = aes(x = Parch, y= ..prop..))+ geom_bar()+facet_wrap(~Survived)
+```
+
+### Analisando a Idade
+
+```{r}
+ggplot(data= dados, aes(x = dados$Age, y = ..density.. , col= dados$Survived)) + geom_freqpoly()+  xlim(0,80) + scale_x_continuous(n.breaks=10)
+
+min(dados$Age, na.rm = T)
+```
+
+### Analisando variável categórica com variável categórica
+
+```{r}
+ggplot(data = dados) +
+  geom_count(mapping = aes(x = Sex, y = Survived))
+```
+
+Observa-se que o sexo é um fator muito importante para determinar a sobrevivência, a grande maioria da mulheres sobrevivem e a grande maioria dos homens morrem.
+
+## 
+
+```{r}
+ggplot(data = dados) +
+  geom_count(mapping = aes(x = Pclass, y = Survived))
+```
+
+Nota-se que a classe do ticket também é relevnte para determinar a sobrevivência.
+
+```{r}
+ggplot(data = dados) +
+  geom_count(mapping = aes(x = Embarked, y = Survived))
+```
+
+Observa-se que o porto de embarque tem um impacto menor na sobrevivência.
+
+Verificando multicolinearidade entre Pclass e Fare
+
+```{r}
+ggplot(data = dados, mapping = aes(x = Pclass, y = Fare))+ geom_boxplot()
+
+
+```
+
+As duas variáveis aparentam estar fortemente correlacionadas e explicam a mesma coisa.
+
+Verificar FIV = 1/(1-R\^2)
+
+```{r}
+ajuste <- lm(Fare ~ Pclass)
+summary(ajuste)
+```
+
+O R\^2 ajustado foi de 0,3516
+
+```{r}
+# Calculando FIV 
+FIV <- 1/(1- 0.3516 )
+FIV
+FIV < 5
+# A multicolinearidade entre as variáveis não é severa.
+```
+
+## Modelagem
+
+A princípio abordaremos o problema usando técnicas de modelos lineares generalizados para dados Bernoulli/ Binários.
+
+### Regressão Logística
+
+Considera a função de ligação o parâmetro canônico b(p)= ln(p/p-1).
+
+Dessa forma teremos: ln(p/1-p)= xi\^t \* B = Ni (preditor linear)
+
+p = 1 / (1 + e\^-Ni)
+
+Ex: ln(p/1-p) = b0 + b1\*x1
+
+### Separando a base em Treino e Teste (falta validação)
+
+O banco de dados de 891 observações será particionado em 700 observações para o banco treino e 191 observações para o banco teste, por meio de um sorteio.
+
+```{r}
+set.seed(1)
+index = sort(sample(nrow(dados), 700, replace=F))
+table(dados$Survived[index])
+
+```
+
+```{r}
+train.db <- dados[index,]
+valid.db <- dados[-index,]
+```
+
+Feito essa separação e evitado o data leakage vamos fazer o 1° modelo
+
+```{r}
+detach(dados)
+attach(train.db)
+
+```
+
+## Modelo 1
+
+```{r}
+modelo1 <- glm(Survived ~ Pclass + Sex , family = binomial(link = 'logit'))
+
+summary(modelo1)
+```
+
+Todas as variáveis são significativas para o modelo
+
+### Fazendo teste da Anova
+
+```{r}
+anova(modelo1, test="LR")
+```
+
+```{r}
+eta = predict(modelo1)
+odds = exp(eta)
+plot(odds)+ abline(h=1, col='blue', lwd = 2)
+```
+
+Se oddsi = 1, as chances de morte ou sobrevivência são iguais para o tripulante i. Se oddsi \> 1, o tripulante i tem chance de sobrevivência maior que a de morte. Se oddsi \< 1, o tripulante i tem chance de sobrevivência menor que a de morte.
+
+### Interpretação
+
+```{r}
+100* (exp(modelo1$coefficients['Sexmale'])-1)
+```
+
+Ser homen causa uma redução de 92,5% na razão de chance de sobreviver.
+
+### Achando a Probabilidade
+
+```{r}
+eta = predict(modelo1)
+odds = exp(eta)
+p = 1/(1+exp(-eta))
+plot(p)
+```
+
+### Calculando as probabilidades nos dados de validação
+
+```{r}
+probabilidade =  1/(1+ exp(-predict(object = modelo1, newdata = valid.db)))
+```
+
+### Curva Roc
+
+```{r}
+curva = roc(valid.db$Survived ~ probabilidade)
+plot(curva, col = 'blue')
+```
+
+### Escolher um critério de classificação
+
+```{r}
+# não sei extamente como fazer 
+# acredito q tenha q fazer curva roc/ olhar AUC para diferentes criterios
+plot.roc(valid.db$Survived , probabilidade,
+         main="Confidence interval of a threshold", percent=TRUE,
+         ci=TRUE, of="thresholds", # compute AUC (of threshold)
+         thresholds="best", # select the (best) threshold
+         print.thres="best") # also highlight this threshold on the plot
+
+```
+
+## Fazendo Previsão
+
+```{r}
+# Calculando para a base teste do kaggle
+
+teste_kaggle <- read_csv("test.csv")
+```
+
+```{r}
+
+teste_kaggle$Pclass <- as.factor(teste_kaggle$Pclass)
+
+prob_prevista2 =  1/(1+ exp(-predict(object = modelo1, newdata = teste_kaggle)))
+
+teste_kaggle$prob_prevista2 <- prob_prevista2
+
+previsao <- ifelse(teste_kaggle$prob_prevista2 > 0.5, 1, 0)
+
+teste_kaggle$previsao <- previsao
+
+```
+
+```{r}
+submissao_reg_log <- data.frame(
+  PassengerId = teste_kaggle$PassengerId,
+  Survived = teste_kaggle$previsao
+)
+head(submissao_reg_log, 10)
+```
+
+```{r}
+# write_csv(submissao_reg_log, 'submissao_reg_log.csv')
+```
+
+## Modelo 2
+
+### Criando Variável
+
+```{r}
+train.db$Age_No_NA <- ifelse(is.na(train.db$Age),mean(train.db$Age, na.rm = T),train.db$Age)
+train.db$crianca <- ifelse(train.db$Age_No_NA < 6,1,0)
+```
+
+### Removendo NA Embarked
+
+```{r}
+train.db_sem_na <- train.db
+train.db_sem_na <- train.db_sem_na[-is.na(train.db$Embarked),]
+```
+
+### Ajustando Modelo
+
+```{r}
+detach(train.db)
+attach(train.db_sem_na)
+
+```
+
+```{r}
+modelo2 <- glm(Survived ~ Pclass + Sex + crianca + SibSp + Parch + Embarked , family = binomial(link = 'logit'))
+summary(modelo2)
+```
+
+```{r}
+eta = predict(modelo2)
+odds = exp(eta)
+plot(odds)+ abline(h=1, col='blue', lwd = 2)
+```
+
+## Achando a Probabilidade
+
+```{r}
+eta = predict(modelo2)
+odds = exp(eta)
+p = 1/(1+exp(-eta))
+plot(p)
+```
+
+## Primeiro tratar os dados
+
+```{r}
+# Primeiro tratar os dados 
+valid.db$Age_No_NA <- ifelse(is.na(valid.db$Age),mean(valid.db$Age, na.rm = T),valid.db$Age)
+valid.db$crianca <- ifelse(valid.db$Age_No_NA < 6,1,0)
+valid.db_sem_na <- valid.db
+valid.db_sem_na <- valid.db_sem_na[-is.na(valid.db$Age),]
+```
+
+### **Calculando as probabilidades nos dados de validação**
+
+```{r}
+probabilidade =  1/(1+ exp(-predict(object = modelo2, newdata = valid.db_sem_na)))
+```
+
+## Curva Roc
+
+```{r}
+curva = roc(valid.db_sem_na$Survived ~ probabilidade)
+plot(curva, col = 'blue')
+```
+
+### **Escolher um critério de classificação**
+
+```{r}
+plot.roc(valid.db_sem_na$Survived , probabilidade,
+         main="Confidence interval of a threshold", percent=TRUE,
+         ci=TRUE, of="thresholds", # compute AUC (of threshold)
+         thresholds="best", # select the (best) threshold
+         print.thres="best") # also highlight this threshold on the plot
+```
+
+## Fazendo Previsão
+
+```{r}
+# Calculando para a base teste do kaggle
+
+teste_kaggle <- read_csv("test.csv")
+```
+
+### Primeiro tratar os dados
+
+```{r}
+teste_kaggle$Age_No_NA <- ifelse(is.na(teste_kaggle$Age),mean(teste_kaggle$Age, na.rm = T),teste_kaggle$Age)
+teste_kaggle$crianca <- ifelse(teste_kaggle$Age_No_NA < 6,1,0)
+teste_kaggle_sem_na <- teste_kaggle
+#teste_kaggle_sem_na <- teste_kaggle_sem_na[-is.na(teste_kaggle$Embarked),]
+```
+
+```{r}
+teste_kaggle_sem_na$Pclass <- as.factor(teste_kaggle_sem_na$Pclass)
+
+prob_prevista2 =  1/(1+ exp(-predict(object = modelo2, newdata = teste_kaggle_sem_na)))
+
+teste_kaggle_sem_na$prob_prevista2 <- prob_prevista2
+
+# tinha esquecido de mudar aq para 0.4
+# mudei e piorou :(
+previsao <- ifelse(teste_kaggle_sem_na$prob_prevista2 > 0.4, 1, 0)
+
+teste_kaggle_sem_na$previsao <- previsao
+```
+
+```{r}
+submissao_reg_log_full <- data.frame(
+  PassengerId = teste_kaggle_sem_na$PassengerId,
+  Survived = teste_kaggle_sem_na$previsao
+)
+head(submissao_reg_log_full, 10)
+```
+
+```{r}
+write_csv(submissao_reg_log_full, 'submissao_reg_log_full.csv')
+```
+
+```{r}
+probabilidade1 =  1/(1+ exp(-predict(object = modelo1, newdata = valid.db)))
+curva1 = roc(valid.db$Survived ~ probabilidade1)
+curva2 = roc(valid.db_sem_na$Survived ~ probabilidade)
+plot(curva1, col = 'blue')
+lines(curva2, col = 'red')
+```
+
+Vemos que o ajuste com mais variáveis foi ligeiramente melhor.
